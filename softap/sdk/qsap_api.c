@@ -91,7 +91,8 @@ s8 *Cmd_req[eCMD_REQ_LAST] = {
 s8 *Conf_req[CONF_REQ_LAST] = {
     "dual2g",
     "dual5g",
-    "owe"
+    "owe",
+    "60g",
 };
 
 /*
@@ -188,6 +189,13 @@ static struct Command cmd_list[eCMD_LAST] = {
     { "deny_mac_file",         NULL             },
     { "owe_transition_ifname", NULL             },
     { "sae_require_mfp",       NULL             },
+    { "op_class",              "0"              },
+    { "freqlist",              NULL             },
+    { "acs_exclude_6ghz_non_psc", "0"           },
+    { "he_oper_chwidth",      NULL              },
+    { "ieee80211ax",           NULL             },
+    { "enable_edmg",           NULL             },
+    { "edmg_channel",          NULL             },
 
 };
 
@@ -215,7 +223,7 @@ struct Command qsap_str[eSTR_LAST] = {
 
 /** Supported operating mode */
 char *hw_mode[HW_MODE_UNKNOWN] = {
-    "b", "g", "n", "g-only", "n-only", "a", "any"
+    "b", "g", "n", "g-only", "n-only", "a", "any", "ad"
 };
 
 /** configuration file path */
@@ -417,6 +425,19 @@ static s32 qsap_write_cfg(s8 *pfile, struct Command * pcmd, s8 *pVal, s8 *presp,
     /** Remove the temporary file. Dont care the return value */
     unlink(buf);
 
+    fcfg = fopen(pfile, "r");
+    if (fcfg != NULL) {
+        if (fsync(fileno(fcfg))) {
+            ALOGE("%s : fsync on %s failed with error : %s \n", __func__, pfile, strerror(errno));
+            fclose(fcfg);
+            return eERR_UNKNOWN;
+        }
+        fclose(fcfg);
+    } else {
+        ALOGE("%s : unable to open %s \n", __func__, pfile);
+        return eERR_FILE_OPEN;
+    }
+
     /* chmod is needed because open() didn't set permisions properly */
     if (chmod(pfile, 0660) < 0) {
         ALOGE("Error changing permissions of %s to 0660: %s",
@@ -561,6 +582,19 @@ static s32 qsap_change_cfg(s8 *pfile, struct Command * pcmd, u32 status)
 
     /** Delete the temporary file */
     unlink(buf);
+
+    fcfg = fopen(pfile, "r");
+    if (fcfg != NULL) {
+        if (fsync(fileno(fcfg))) {
+            ALOGE("%s : fsync on %s failed with error : %s \n", __func__, pfile, strerror(errno));
+            fclose(fcfg);
+            return eERR_UNKNOWN;
+        }
+        fclose(fcfg);
+    } else {
+        ALOGE("%s : unable to open %s \n", __func__, pfile);
+        return eERR_UNKNOWN;
+    }
 
     /* chmod is needed because open() didn't set permisions properly */
     if (chmod(pfile, 0660) < 0) {
@@ -2515,6 +2549,10 @@ static int qsap_set_operating_mode(s32 mode, s8 *pmode, int pmode_len, s8 *tbuf,
             ulen = *tlen;
             qsap_write_cfg(pcfg, &cmd_list[eCMD_IEEE80211N],ieee11n_disable, tbuf, &ulen, HOSTAPD_CONF_QCOM_FILE);
             break;
+        case HW_MODE_AD:
+            /** For 802.11ad, disable the 802.11 HT */
+            qsap_change_cfg(pcfg, &cmd_list[eCMD_HT_CAPAB], DISABLE);
+            break;
     }
     if(mode == HW_MODE_G_ONLY || mode == HW_MODE_N_ONLY || mode == HW_MODE_N ) {
         qsap_scnprintf(pmode, pmode_len, "%s",hw_mode[HW_MODE_G]);
@@ -2604,6 +2642,9 @@ static void qsap_handle_set_request(s8 *pcmd, s8 *presp, u32 *plen)
            SKIP_BLANK_SPACE(pcmd);
     } else if (!(strncmp(pcmd, Conf_req[CONF_owe], strlen(Conf_req[CONF_owe])))) {
            pcmd += strlen(Conf_req[CONF_owe]);
+           SKIP_BLANK_SPACE(pcmd);
+    } else if (!(strncmp(pcmd, Conf_req[CONF_60g], strlen(Conf_req[CONF_60g])))) {
+           pcmd += strlen(Conf_req[CONF_60g]);
            SKIP_BLANK_SPACE(pcmd);
     } else {
 	    // DO NOTHING
@@ -3136,6 +3177,15 @@ static void qsap_handle_set_request(s8 *pcmd, s8 *presp, u32 *plen)
             qsap_change_cfg(pcfg, &cmd_list[eCMD_SSID], DISABLE);
             break;
 
+        case eCMD_OPER_CLASS:
+            value = atoi(pVal);
+            if(value == 0) {
+            /* Disable oper_class if 2G or 5G band is selected */
+                qsap_change_cfg(pcfg, &cmd_list[eCMD_OPER_CLASS], DISABLE);
+                return;
+            }
+            else break;
+
         default: ;
             /** Do not goto error, in default case */
     }
@@ -3181,6 +3231,8 @@ void qsap_hostd_exec_cmd(s8 *pcmd, s8 *presp, u32 *plen)
            pconffile = CONFIG_FILE_5G;
        } else if (!(strncmp(pcmd+4, Conf_req[CONF_owe], strlen(Conf_req[CONF_owe])))) {
            pconffile = CONFIG_FILE_OWE;
+       } else if (!(strncmp(pcmd+4, Conf_req[CONF_60g], strlen(Conf_req[CONF_60g])))) {
+           pconffile = CONFIG_FILE_60G;
        } else {
            pconffile = CONFIG_FILE;
        }
@@ -3239,10 +3291,11 @@ int qsapsetSoftap(int argc, char *argv[])
         ALOGD("ARG: %d - %s\n", i+1, argv[i]);
     }
 
-    // check if 2nd arg is dual2g/dual5g
+    // check if 2nd arg is dual2g/dual5g/owe/60g
     if (argc > 2
          && (strncmp(argv[2], Conf_req[CONF_2g], 4) == 0
-             || strncmp(argv[2], Conf_req[CONF_owe], 3) == 0)) {
+             || strncmp(argv[2], Conf_req[CONF_owe], 3) == 0
+             || strncmp(argv[2], Conf_req[CONF_60g], 3) == 0)) {
             snprintf(setCmd, SET_BUF_LEN, "set %s", argv[2]);
             offset = 1;
             argc--;
